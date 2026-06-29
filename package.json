@@ -1,0 +1,21 @@
+{
+  "name": "s3-statutory-compliance-engine",
+  "version": "1.0.0",
+  "description": "Enterprise-grade Indian Statutory Compliance Engine (TDS, TCS, GST, etc.)",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "s3",
+    "compliance",
+    "tds",
+    "tcs",
+    "tax"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "mongoose": "^8.24.1"
+  }
+}
