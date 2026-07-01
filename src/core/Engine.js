@@ -1,5 +1,16 @@
+const RuleEngine = require('../engines/RuleEngine');
+const CalculationEngine = require('../engines/CalculationEngine');
+const ValidationEngine = require('../engines/ValidationEngine');
+const ReturnEngine = require('../engines/ReturnEngine');
+const ReconciliationEngine = require('../engines/ReconciliationEngine');
+const ComplianceReportEngine = require('../engines/ComplianceReportEngine');
+
+const tdsProvider = require('../providers/tds');
+
 /**
- * Core Statutory Compliance Engine
+ * ComplianceEngine Facade
+ * Acts as the single entry point for host applications.
+ * Routes requests to specific sub-engines and providers based on the domain.
  */
 class ComplianceEngine {
     /**
@@ -14,109 +25,116 @@ class ComplianceEngine {
         this.tenantContext = tenantContext || {};
         this.logger = logger || console;
 
-        // Engine assumes the host has already registered these models on the connection
-        // using the Schema factories provided by this library.
-        this.ComplianceSection = this.connection.models.ComplianceSection;
-        this.ComplianceRule = this.connection.models.ComplianceRule;
-        this.ComplianceRateHistory = this.connection.models.ComplianceRateHistory;
-
-        if (!this.ComplianceSection || !this.ComplianceRule || !this.ComplianceRateHistory) {
+        // Ensure required schemas are registered by host
+        if (!this.connection.models.ComplianceSection || 
+            !this.connection.models.ComplianceRule || 
+            !this.connection.models.ComplianceRateHistory) {
             throw new Error('[ComplianceEngine] Required schemas are not registered on this connection.');
         }
+
+        // Initialize Sub-Engines
+        this.ruleEngine = new RuleEngine({ connection: this.connection, logger: this.logger });
+        this.calculationEngine = new CalculationEngine({ connection: this.connection, logger: this.logger });
+        this.validationEngine = new ValidationEngine({ connection: this.connection, logger: this.logger });
+        this.returnEngine = new ReturnEngine({ connection: this.connection, logger: this.logger });
+        this.reconciliationEngine = new ReconciliationEngine({ connection: this.connection, logger: this.logger });
+        this.complianceReportEngine = new ComplianceReportEngine({ connection: this.connection, logger: this.logger });
+
+        // Register Providers
+        this.providers = {
+            'TDS': tdsProvider,
+            'GST': require('../providers/gst'),
+            'MSME': require('../providers/msme'),
+            'TCS': require('../providers/tcs'),
+            'BANKING': require('../providers/banking')
+        };
+    }
+
+    _getProvider(domain) {
+        const provider = this.providers[domain];
+        if (!provider) throw new Error(`[ComplianceEngine] Provider for domain '${domain}' not found.`);
+        return provider;
     }
 
     /**
-     * Evaluates compliance rules based on DSL expression.
+     * Evaluates compliance rules dynamically using the RuleEngine and Provider.
+     * @param {String} domain - e.g., 'TDS', 'GST'
+     * @param {Object} payload - Data payload to evaluate
      */
-    async Evaluate({ transactionType, partyInfo, amount, date }) {
-        // Simple mapping for MVP blueprint
-        let sectionCode = null;
-        if (transactionType === 'INTEREST_PAYMENT') sectionCode = '194A';
-        if (!sectionCode) return { isApplicable: false };
-
-        const section = await this.ComplianceSection.findOne({ sectionCode, isActive: true });
-        if (!section) return { isApplicable: false };
-
-        const rules = await this.ComplianceRule.find({ sectionId: section._id, isActive: true });
-        
-        for (const rule of rules) {
-            // Pseudo Rule DSL Evaluator
-            // In a real implementation, we'd parse rule.ruleExpression safely using a library like Jexl or a custom AST parser.
-            let match = true; // Assuming match for MVP purposes
-
-            if (match) {
-                const rateHistory = await this.ComplianceRateHistory.findOne({
-                    ruleId: rule._id,
-                    effectiveFrom: { $lte: date },
-                    $or: [
-                        { effectiveTo: null },
-                        { effectiveTo: { $gte: date } }
-                    ]
-                });
-
-                if (rateHistory) {
-                    const isAboveThreshold = amount > (rateHistory.thresholdAmount || 0);
-                    if (isAboveThreshold) {
-                        return {
-                            isApplicable: true,
-                            section: section.sectionCode,
-                            taxType: section.taxType,
-                            rate: rateHistory.ratePercentage,
-                            taxAmount: (amount * rateHistory.ratePercentage) / 100,
-                            _auditInfo: {
-                                sectionId: section._id,
-                                ruleId: rule._id,
-                                rateHistoryId: rateHistory._id,
-                                thresholdMatched: rateHistory.thresholdAmount
-                            }
-                        };
-                    }
-                }
-            }
+    async Evaluate(domain = 'TDS', payload) {
+        // Backwards compatibility for single-argument (payload) signature in existing SUPER-POS
+        if (typeof domain === 'object') {
+            payload = domain;
+            domain = 'TDS';
         }
-
-        return { isApplicable: false };
+        
+        const provider = this._getProvider(domain);
+        return await this.ruleEngine.evaluate(provider, payload);
     }
 
-    GenerateEntries(evaluationResult) {
-        if (!evaluationResult || !evaluationResult.isApplicable) return [];
-
-        const entries = [];
-        if (evaluationResult.taxType === 'TDS') {
-            entries.push({
-                type: 'TDS_PAYABLE',
-                action: 'CREDIT',
-                amount: evaluationResult.taxAmount,
-                section: evaluationResult.section
-            });
+    /**
+     * Calculates tax entries based on evaluation results.
+     * @param {String} domain - e.g., 'TDS', 'GST'
+     * @param {Object} evaluationResult 
+     */
+    GenerateEntries(domain = 'TDS', evaluationResult) {
+        if (typeof domain === 'object') {
+            evaluationResult = domain;
+            domain = 'TDS';
         }
-        return entries;
+
+        const provider = this._getProvider(domain);
+        return this.calculationEngine.calculate(provider, evaluationResult);
     }
 
     /**
      * Explain() API to return the decision tree for audit purposes.
+     * @param {String} domain 
      * @param {Object} evaluationResult 
      */
-    async Explain(evaluationResult) {
-        if (!evaluationResult || !evaluationResult.isApplicable) {
-            return "No compliance rule was applicable for this transaction.";
+    async Explain(domain = 'TDS', evaluationResult) {
+        if (typeof domain === 'object') {
+            evaluationResult = domain;
+            domain = 'TDS';
         }
 
-        const audit = evaluationResult._auditInfo;
-        const section = await this.ComplianceSection.findById(audit.sectionId);
-        const rule = await this.ComplianceRule.findById(audit.ruleId);
-        
-        const explanation = `
-=== Compliance Deduction Explanation ===
-1. Trigger: Transaction matched Section ${section.sectionCode} (${section.description}).
-2. Rule Evaluated: ${rule.ruleName}
-3. Condition Met: DSL Expression [${rule.ruleExpression}] evaluated to true based on party details.
-4. Threshold Check: Transaction amount crossed the threshold of ₹${audit.thresholdMatched}.
-5. Rate Applied: ${evaluationResult.rate}% was active on the transaction date.
-6. Result: Tax amount deduced is ₹${evaluationResult.taxAmount}.
-========================================
-        `.trim();
-        return explanation;
+        const provider = this._getProvider(domain);
+        if (typeof provider.explain === 'function') {
+            return provider.explain(evaluationResult);
+        }
+        return "Explanation not implemented for this domain.";
+    }
+
+    /**
+     * Validate structural and legal payloads.
+     */
+    async Validate(domain, payload) {
+        const provider = this._getProvider(domain);
+        return await this.validationEngine.validate(provider, payload);
+    }
+
+    /**
+     * Generate structured statutory returns.
+     */
+    async GenerateReturn(domain, parameters) {
+        const provider = this._getProvider(domain);
+        return await this.returnEngine.generateReturn(provider, parameters);
+    }
+
+    /**
+     * Reconcile portal data vs books.
+     */
+    async Reconcile(domain, booksData, portalData) {
+        const provider = this._getProvider(domain);
+        return await this.reconciliationEngine.reconcile(provider, booksData, portalData);
+    }
+
+    /**
+     * Generate CA registers and PDFs.
+     */
+    async GenerateReport(domain, parameters) {
+        const provider = this._getProvider(domain);
+        return await this.complianceReportEngine.generateReport(provider, parameters);
     }
 }
 

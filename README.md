@@ -1,20 +1,33 @@
 # S3 Statutory Compliance Engine
 
-An enterprise-grade, business-agnostic Node.js engine for managing Indian Statutory Compliances (TDS, TCS, GST, etc.) across the S3 ecosystem.
+An enterprise-grade, platform-based Node.js library for managing comprehensive Indian Statutory Compliances (GST, Income Tax, TDS, TCS, MSME, Banking, etc.) across the entire S3 ecosystem.
 
-## Overview
-This library provides a centralized, configuration-driven rule engine to evaluate and calculate taxes dynamically. It is designed to be completely independent of any specific business module (like Sales, Purchase, Payroll, or Loans), meaning it can be plugged into any product in the S3 ecosystem (e.g., SUPER-POS, Medical POS, Future Agro ERP) without duplicating compliance logic.
+## 🌟 Overview
+This library provides a highly modular, decoupled, and configuration-driven compliance engine. Designed with a **Facade + Provider Pattern**, it serves as a central statutory authority independent of any specific business module (Sales, Purchase, Payroll, Loans). It can be plugged into any host product (e.g., SUPER-POS, Medical POS, Agro ERP).
 
-## Key Features
-- **Stateless Architecture:** The engine does not save transactions. It evaluates rules and returns results; the host application owns the audit trails.
-- **Accounting-Independent:** The engine has no knowledge of Ledger IDs. It returns generic ledger instructions (e.g., `TDS_PAYABLE`), which the host application maps to actual ledgers.
-- **Tenant-Agnostic:** Designed to seamlessly support Shared, Dedicated, and BYOD database strategies by accepting a standard `tenantContext` and the host's Mongoose connection.
-- **Configuration-Driven:** Tax laws (like Section 194A) are stored as dynamic, date-versioned rules (Rule DSL). No source code changes are required when government rates change.
-- **Explainable AI:** Includes a powerful `Explain()` API that generates a human-readable decision tree outlining exactly why a tax was deducted.
+## 🏗️ Architecture
 
-## Installation
+The library is strictly architected on a **Facade + Provider + Sub-Engine** pattern to ensure 10-15 years of scalability.
 
-Add this library to your host application's `package.json` using the GitHub URL:
+1. **Facade (`Engine.js`)**: The single entry point. Contains NO business logic. It orchestrates communication between the host application and the underlying providers.
+2. **Sub-Engines**: Generic, logic-agnostic engines that process compliance workflows:
+   - `RuleEngine`: Thresholds, dates, limits.
+   - `CalculationEngine`: Financial math and deductions.
+   - `ValidationEngine`: PAN/GSTIN structure, E-Way Bill distance limits.
+   - `ReturnEngine`: Government structured outputs (JSON/FVU).
+   - `ReconciliationEngine`: GSTR-2B vs Books mapping.
+   - `ComplianceReportEngine`: CA and Management Registers.
+3. **Providers (`providers/gst`, `tds`, `msme`, etc.)**: Domain-specific implementations that supply rules to the Sub-Engines.
+4. **Adapters (`adapters/`)**: Modules for external communication (GSTN APIs, Income Tax Portals).
+
+## 🛡️ Core Principles (The 5 Golden Rules)
+- **No Business Logic in Facade**: `Engine.js` acts only as a router.
+- **Provider Isolation**: Providers (e.g., GST, TDS) never call each other directly. Coordination happens through the Facade.
+- **Configuration-Driven Rules**: No hardcoded `if-else` tax rules. Rules are dynamically parsed.
+- **Stable Public API**: Internal refactoring must never break the host application's integration.
+- **Tenant-Agnostic**: `s3-saas-core` owns the DB abstraction (Shared, Dedicated, BYOD). The engine operates blindly on the injected Mongoose connection.
+
+## 📦 Installation
 
 ```json
 "dependencies": {
@@ -22,20 +35,19 @@ Add this library to your host application's `package.json` using the GitHub URL:
 }
 ```
 
-## Basic Usage
+## 🚀 Basic Usage
 
 ```javascript
 const ComplianceEngine = require('s3-statutory-compliance-engine');
 
-// 1. Initialize the engine with your Mongoose connection and Tenant Context
+// 1. Initialize the Facade
 const engine = new ComplianceEngine({
-    connection: mongooseConnection,
-    tenantContext: req.tenantContext,
-    logger: globalLogger
+    connection: req.db, // Mongoose connection
+    tenantContext: req.tenantContext
 });
 
-// 2. Evaluate a transaction
-const evalResult = await engine.Evaluate({
+// 2. Evaluate using a specific Domain Provider
+const evalResult = await engine.Evaluate('TDS', {
     transactionType: 'INTEREST_PAYMENT',
     partyInfo: { partyType: 'NBFC', hasPAN: true },
     amount: 6000,
@@ -43,20 +55,10 @@ const evalResult = await engine.Evaluate({
 });
 
 if (evalResult.isApplicable) {
-    console.log(`Tax Amount: ${evalResult.taxAmount}`);
-    
     // 3. Generate generic ledger entry instructions
-    const entries = engine.GenerateEntries(evalResult);
-    console.log(entries); // E.g. [{ type: 'TDS_PAYABLE', action: 'CREDIT', amount: 600 }]
-    
-    // 4. (Optional) Get an explanation for auditing
-    const explanation = await engine.Explain(evalResult);
-    console.log(explanation);
+    const entries = engine.GenerateEntries('TDS', evalResult);
+    console.log(entries);
 }
 ```
 
-## Architecture Principles
-1. **Schema Factories over Models:** The library exports Schema Factories (`getComplianceSectionSchema`, etc.) rather than compiled Mongoose models. The host application must register these on its own connection.
-2. **Rule DSL:** Complex compliance conditions are handled via a custom Rule DSL string rather than nested JSON, ensuring 10-15 years of scalability as tax laws evolve.
-
-Please see `developer-manual.md` for in-depth integration instructions, schema overrides, and contribution guidelines.
+For detailed integration guides, schema documentation, and provider implementation steps, please read the `developer-manual.md`.
